@@ -1049,7 +1049,7 @@ zledit-setup-bindings() {
 }
 
 # Defer binding setup to a one-time precmd hook so it runs after compinit and
-# other plugins (e.g. zsh-syntax-highlighting) which may overwrite ^[/ later.
+# Other plugins (e.g. zsh-syntax-highlighting) which may overwrite the binding key later.
 _zledit_deferred_setup() {
     zledit-setup-bindings
     add-zsh-hook -d precmd _zledit_deferred_setup
