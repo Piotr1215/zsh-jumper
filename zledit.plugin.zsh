@@ -1048,7 +1048,15 @@ zledit-setup-bindings() {
     bindkey "$key" zledit-widget
 }
 
-zledit-setup-bindings
+# Defer binding setup to a one-time precmd hook so it runs after compinit and
+# other plugins (e.g. zsh-syntax-highlighting) which may overwrite ^[/ later.
+_zledit_deferred_setup() {
+    zledit-setup-bindings
+    add-zsh-hook -d precmd _zledit_deferred_setup
+    unfunction _zledit_deferred_setup
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _zledit_deferred_setup
 
 # ------------------------------------------------------------------------------
 # List registered actions/previewers
