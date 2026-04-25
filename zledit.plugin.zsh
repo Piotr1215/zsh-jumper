@@ -170,6 +170,26 @@ _zledit_load_config() {
     zstyle -s ':zledit:' batch-apply val; Zledit[batch-apply]="${val:-on}"
     zstyle -s ':zledit:' fzf-single-key val; Zledit[single-key]="${val:-alt-1}"
 
+    # Composite delimiters: balanced pairs surface as extra tokens in the picker.
+    # Each value is 1 char (symmetric: " ' `) or 2 chars (open/close: () [] {}).
+    # Set to 'off' or empty to disable composite spans.
+    local -a _ze_delim_cfg=()
+    if zstyle -a ':zledit:' composite-delimiters _ze_delim_cfg; then
+        [[ "${_ze_delim_cfg[1]:-}" == "off" ]] && _ze_delim_cfg=()
+    else
+        _ze_delim_cfg=('"' "'" '`' '()' '[]' '{}')
+    fi
+    typeset -g _ze_composite_symmetric="" _ze_composite_opens="" _ze_composite_closes=""
+    local _d
+    for _d in "${_ze_delim_cfg[@]}"; do
+        if (( ${#_d} == 1 )); then
+            _ze_composite_symmetric+="$_d"
+        elif (( ${#_d} == 2 )); then
+            _ze_composite_opens+="${_d[1]}"
+            _ze_composite_closes+="${_d[2]}"
+        fi
+    done
+
     # Extensibility config - unified or separate files
     zstyle -s ':zledit:' config val
     if [[ -n "$val" ]]; then
@@ -326,6 +346,11 @@ _zledit_build_overlay() {
     local -a hints=(a s d f g h j k l q w e r t y u i o p z x c v b n m)
     local i=1 pos word last_end=0 result=""
     while (( i <= ${#_ze_words[@]} )); do
+        # Composite spans cover positions of simple tokens; skip them in overlay
+        if [[ "${_ze_is_composite[$i]:-0}" == "1" ]]; then
+            (( i++ ))
+            continue
+        fi
         pos=${_ze_positions[$i]}
         word=${_ze_words[$i]}
         result+="${BUFFER:$last_end:$((pos - last_end))}"
@@ -382,6 +407,7 @@ _zledit_tokenize() {
     emulate -L zsh
     _ze_words=()
     _ze_positions=()
+    _ze_is_composite=()
 
     local i=0 word_start=-1 in_word=0
     local len=${#BUFFER}
@@ -410,6 +436,124 @@ _zledit_tokenize() {
             _ze_positions+=($word_start)
         }
     fi
+
+    # Mark all simple tokens as non-composite
+    local n=${#_ze_words[@]} k
+    for (( k=1; k<=n; k++ )); do _ze_is_composite+=(0); done
+
+    # Append composite spans (balanced delimiter pairs) as extra tokens
+    _zledit_find_composite_spans
+}
+
+# ------------------------------------------------------------------------------
+# Composite spans (balanced delimiter pairs as tokens)
+# ------------------------------------------------------------------------------
+
+# Balance check for the contents of a delimiter span. The optional second arg
+# is the enclosing delimiter char, which selects the rule:
+#   - symmetric quote (" ' `): require an even count of that same char inside;
+#     other delimiter chars are treated as literal. This mirrors shell quoting
+#     where e.g. apostrophes inside "..." are literal.
+#   - bracket (() [] {}) or unspecified: full greedy stack matching.
+_zledit_is_balanced() {
+    emulate -L zsh
+    local s="$1"
+    local enclosing="${2:-}"
+    local sym="$_ze_composite_symmetric"
+    local opens="$_ze_composite_opens"
+    local closes="$_ze_composite_closes"
+    local i=1 len=${#s}
+
+    if [[ -n "$enclosing" && -n "$sym" && "$sym" == *"$enclosing"* ]]; then
+        local count=0
+        while (( i <= len )); do
+            [[ "${s[$i]}" == "$enclosing" ]] && (( count++ ))
+            (( i++ ))
+        done
+        (( count % 2 == 0 ))
+        return $?
+    fi
+
+    local stack="" c top expected idx_str
+    while (( i <= len )); do
+        c="${s[$i]}"
+        if [[ -n "$opens" && "$opens" == *"$c"* ]]; then
+            stack+="$c"
+        elif [[ -n "$closes" && "$closes" == *"$c"* ]]; then
+            [[ -z "$stack" ]] && return 1
+            top="${stack[-1]}"
+            idx_str="${opens%%${top}*}"
+            expected="${closes[$(( ${#idx_str} + 1 ))]}"
+            [[ "$c" == "$expected" ]] || return 1
+            stack="${stack[1,-2]}"
+        elif [[ -n "$sym" && "$sym" == *"$c"* ]]; then
+            if [[ -n "$stack" && "${stack[-1]}" == "$c" ]]; then
+                stack="${stack[1,-2]}"
+            else
+                stack+="$c"
+            fi
+        fi
+        (( i++ ))
+    done
+    [[ -z "$stack" ]]
+}
+
+# Find all balanced delimiter pairs in BUFFER. Each match is appended as a
+# composite token to _ze_words / _ze_positions / _ze_is_composite.
+_zledit_find_composite_spans() {
+    emulate -L zsh
+    local sym="$_ze_composite_symmetric"
+    local opens="$_ze_composite_opens"
+    local closes="$_ze_composite_closes"
+
+    [[ -z "$sym$opens$closes" ]] && return 0
+
+    local buf="$BUFFER"
+    local len=${#buf}
+
+    # Pass 1: collect delimiter positions (0-based) and chars
+    local -a delim_pos delim_char
+    local i=1 c
+    while (( i <= len )); do
+        c="${buf[$i]}"
+        if [[ "$sym$opens$closes" == *"$c"* ]]; then
+            delim_pos+=($(( i - 1 )))
+            delim_char+=("$c")
+        fi
+        (( i++ ))
+    done
+
+    local n=${#delim_pos[@]}
+    (( n < 2 )) && return 0
+
+    # Pass 2: enumerate (a,b) delimiter-index pairs, keep balanced ones
+    local a b ca cb pa pb inside idx_str matches
+    for (( a=1; a<=n; a++ )); do
+        for (( b=a+1; b<=n; b++ )); do
+            ca="${delim_char[$a]}"
+            cb="${delim_char[$b]}"
+            matches=0
+
+            if [[ -n "$sym" && "$sym" == *"$ca"* && "$ca" == "$cb" ]]; then
+                matches=1
+            elif [[ -n "$opens" && "$opens" == *"$ca"* && "$closes" == *"$cb"* ]]; then
+                idx_str="${opens%%${ca}*}"
+                [[ "${closes[$(( ${#idx_str} + 1 ))]}" == "$cb" ]] && matches=1
+            fi
+
+            (( ! matches )) && continue
+
+            pa=${delim_pos[$a]}
+            pb=${delim_pos[$b]}
+            inside="${buf:$(( pa + 1 )):$(( pb - pa - 1 ))}"
+
+            if _zledit_is_balanced "$inside" "$ca"; then
+                _ze_words+=("${buf:$pa:$(( pb - pa + 1 ))}")
+                _ze_positions+=($pa)
+                _ze_is_composite+=(1)
+            fi
+        done
+    done
 }
 
 # ------------------------------------------------------------------------------
@@ -1084,6 +1228,7 @@ zledit-unload() {
     unfunction zledit-widget _zledit_load_config \
                _zledit_load_default_actions \
                _zledit_invoke_picker _zledit_tokenize \
+               _zledit_is_balanced _zledit_find_composite_spans \
                _zledit_supports_binds _zledit_do_jump \
                _zledit_do_custom_action \
                _zledit_adapter_fzf _zledit_adapter_fzf-tmux \
@@ -1097,7 +1242,9 @@ zledit-unload() {
                _zledit_binding_to_byte _zledit_find_action_by_key \
                zledit-setup-bindings zledit-list zledit-unload 2>/dev/null
 
-    unset '_ze_words' '_ze_positions' '_ze_result_key' '_ze_result_selection' \
+    unset '_ze_words' '_ze_positions' '_ze_is_composite' \
+          '_ze_composite_symmetric' '_ze_composite_opens' '_ze_composite_closes' \
+          '_ze_result_key' '_ze_result_selection' \
           '_ze_invoke_prompt' '_ze_invoke_header' '_ze_invoke_binds' \
           '_ze_invoke_preview_args' '_ze_hint_keys' \
           '_ze_previewer_patterns' '_ze_previewer_descriptions' '_ze_previewer_scripts' \
