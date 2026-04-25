@@ -1090,7 +1090,11 @@ test_tokenizer_special_shell_chars() {
         source '"$PLUGIN_DIR"'/zledit.plugin.zsh
         BUFFER="echo \$VAR | grep -E \"[a-z]+\" > /dev/null && cmd"
         _zledit_tokenize
-        echo "${#_ze_words[@]}:${_ze_words[2]}:${_ze_words[6]}"
+        local simple=0 i
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" != "1" ]] && (( simple++ ))
+        done
+        echo "${simple}:${_ze_words[2]}:${_ze_words[6]}"
     ' 2>&1)
     if [[ "$result" == '10:$VAR:"[a-z]+"' ]]; then
         test_pass "Shell special chars preserved"
@@ -1112,6 +1116,301 @@ test_tokenizer_dashes_flags() {
     else
         test_fail "Dashes/flags failed" "Got: $result"
     fi
+}
+
+# ------------------------------------------------------------------------------
+# Composite span tests
+# ------------------------------------------------------------------------------
+
+# Helper for tests: collect composite spans as 'pos:word' lines, sorted by pos:len
+_test_composite_dump() {
+    local i pos word lines=""
+    for i in {1..${#_ze_words[@]}}; do
+        [[ "${_ze_is_composite[$i]}" == "1" ]] || continue
+        lines+="${_ze_positions[$i]}:${_ze_words[$i]}"$'\n'
+    done
+    print -rn -- "$lines"
+}
+
+test_composite_basic_double_quotes() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'snd -g mcp "ok bob soon"'"'"'
+        _zledit_tokenize
+        local i found=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && \
+              [[ "${_ze_words[$i]}" == "\"ok bob soon\"" ]] && \
+              [[ "${_ze_positions[$i]}" == "11" ]] && found=1
+        done
+        echo "$found"
+    ' 2>&1)
+    [[ "$result" == "1" ]] && test_pass "Composite: double-quoted span surfaces" \
+        || test_fail "Composite double-quote span" "Got: $result"
+}
+
+test_composite_simple_tokens_unchanged() {
+    # Composite enrichment must not change the simple-token view of a buffer.
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'snd -g mcp "ok bob soon"'"'"'
+        _zledit_tokenize
+        local simple=0 i
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" != "1" ]] && (( simple++ ))
+        done
+        echo "$simple:${_ze_words[1]}:${_ze_words[6]}"
+    ' 2>&1)
+    [[ "$result" == "6:snd:soon\"" ]] && test_pass "Composite: simple tokens preserved" \
+        || test_fail "Composite simple tokens" "Got: $result"
+}
+
+test_composite_nested_balanced_pairs() {
+    # "aaa"bbb"aaa" → 4 composites: "aaa" (pos 0), "aaa"bbb"aaa" (pos 0),
+    #                                "bbb" (pos 4), "aaa" (pos 8)
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'"aaa"bbb"aaa"'"'"'
+        _zledit_tokenize
+        local i count=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && (( count++ ))
+        done
+        echo "$count"
+    ' 2>&1)
+    [[ "$result" == "4" ]] && test_pass "Composite: nested balanced pairs (4 candidates)" \
+        || test_fail "Composite nested" "Got: $result (expected 4)"
+}
+
+test_composite_quad_quote_edge() {
+    # """" → 4 composites: "" (×3 at different positions) + """"
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'""""'"'"'
+        _zledit_tokenize
+        local i count=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && (( count++ ))
+        done
+        echo "$count"
+    ' 2>&1)
+    [[ "$result" == "4" ]] && test_pass "Composite: \"\"\"\" edge case (4 candidates)" \
+        || test_fail "Composite quad-quote" "Got: $result (expected 4)"
+}
+
+test_composite_brackets_and_braces() {
+    # echo (a [b] c) {d} → 3 composites: (a [b] c), [b], {d}
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo (a [b] c) {d}'"'"'
+        _zledit_tokenize
+        local i count=0 has_outer=0 has_inner=0 has_brace=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" != "1" ]] && continue
+            (( count++ ))
+            [[ "${_ze_words[$i]}" == "(a [b] c)" ]] && has_outer=1
+            [[ "${_ze_words[$i]}" == "[b]" ]] && has_inner=1
+            [[ "${_ze_words[$i]}" == "{d}" ]] && has_brace=1
+        done
+        echo "$count:$has_outer:$has_inner:$has_brace"
+    ' 2>&1)
+    [[ "$result" == "3:1:1:1" ]] && test_pass "Composite: brackets and braces" \
+        || test_fail "Composite brackets" "Got: $result"
+}
+
+test_composite_backticks() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'run `cmd arg` here'"'"'
+        _zledit_tokenize
+        local i found=""
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && found="${_ze_words[$i]}"
+        done
+        echo "$found"
+    ' 2>&1)
+    [[ "$result" == '`cmd arg`' ]] && test_pass "Composite: backticks" \
+        || test_fail "Composite backticks" "Got: $result"
+}
+
+test_composite_apostrophe_inside_double_quotes() {
+    # Apostrophes inside "..." are literal text (shell-like rule), so
+    # "don't worry" surfaces as a composite span.
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo "don'"'"'"'"'"'"'"'"'t worry"'"'"'
+        _zledit_tokenize
+        local i found=""
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && found="${_ze_words[$i]}"
+        done
+        echo "$found"
+    ' 2>&1)
+    [[ "$result" == "\"don't worry\"" ]] && test_pass "Composite: apostrophe inside double quotes" \
+        || test_fail "Composite apostrophe in double quotes" "Got: $result"
+}
+
+test_composite_realistic_natural_language() {
+    # The motivating real-world case: a quoted command-line argument with
+    # English text that contains apostrophes must surface as a composite.
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'snd -g mcp "ok bob what'"'"'"'"'"'"'"'"'s the status hit"'"'"'
+        _zledit_tokenize
+        local i found=""
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && found="${_ze_words[$i]}"
+        done
+        echo "$found"
+    ' 2>&1)
+    [[ "$result" == "\"ok bob what's the status hit\"" ]] && test_pass "Composite: natural language with apostrophe" \
+        || test_fail "Composite natural-language" "Got: $result"
+}
+
+test_composite_unmatched_no_span() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo "hello'"'"'
+        _zledit_tokenize
+        local i count=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && (( count++ ))
+        done
+        echo "$count"
+    ' 2>&1)
+    [[ "$result" == "0" ]] && test_pass "Composite: unmatched delimiter yields no span" \
+        || test_fail "Composite unmatched" "Got: $result"
+}
+
+test_composite_no_delimiters() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER="kubectl get pods -n default"
+        _zledit_tokenize
+        local i count=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && (( count++ ))
+        done
+        echo "$count"
+    ' 2>&1)
+    [[ "$result" == "0" ]] && test_pass "Composite: no delimiters → no spans" \
+        || test_fail "Composite no-delim" "Got: $result"
+}
+
+test_composite_empty_buffer() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER=""
+        _zledit_tokenize
+        echo "${#_ze_words[@]}:${#_ze_is_composite[@]}"
+    ' 2>&1)
+    [[ "$result" == "0:0" ]] && test_pass "Composite: empty buffer safe" \
+        || test_fail "Composite empty buffer" "Got: $result"
+}
+
+test_composite_config_off() {
+    local result
+    result=$(zsh -c '
+        zstyle ":zledit:" composite-delimiters off
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo "hello world" (x)'"'"'
+        _zledit_tokenize
+        local i count=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" == "1" ]] && (( count++ ))
+        done
+        echo "$count"
+    ' 2>&1)
+    [[ "$result" == "0" ]] && test_pass "Composite: config off disables" \
+        || test_fail "Composite config off" "Got: $result"
+}
+
+test_composite_config_subset() {
+    # Configure only () and skip everything else — quotes should not produce composites.
+    local result
+    result=$(zsh -c '
+        zstyle ":zledit:" composite-delimiters "()"
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo "hello" (world)'"'"'
+        _zledit_tokenize
+        local i quotes=0 parens=0
+        for i in {1..${#_ze_words[@]}}; do
+            [[ "${_ze_is_composite[$i]}" != "1" ]] && continue
+            [[ "${_ze_words[$i]}" == "(world)" ]] && parens=1
+            [[ "${_ze_words[$i]}" == "\"hello\"" ]] && quotes=1
+        done
+        echo "parens=$parens quotes=$quotes"
+    ' 2>&1)
+    [[ "$result" == "parens=1 quotes=0" ]] && test_pass "Composite: config subset honored" \
+        || test_fail "Composite config subset" "Got: $result"
+}
+
+test_composite_balanced_helper() {
+    # Direct unit test of _zledit_is_balanced.
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        local outcomes=""
+        for s in "" "abc" "()" "(())" "([])" "([)]" "(" "(()" "\"x\"" "\"x"; do
+            if _zledit_is_balanced "$s"; then outcomes+="1"; else outcomes+="0"; fi
+        done
+        echo "$outcomes"
+    ' 2>&1)
+    # Expected per delimiter logic:
+    # ""=ok, "abc"=ok, "()"=ok, "(())"=ok, "([])"=ok,
+    # "([)]"=mismatched close, "("=open w/ no close,
+    # "(()"=open w/ no close, "\"x\""=ok, "\"x"=lone quote
+    [[ "$result" == "1111100010" ]] && test_pass "Composite: _zledit_is_balanced unit cases" \
+        || test_fail "Composite balanced helper" "Got: $result (expected 1111100010)"
+}
+
+test_composite_overlay_skips_composites() {
+    # Overlay must not insert hint markers for composite tokens (they overlap simple-token positions).
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'snd "hi there"'"'"'
+        _zledit_tokenize
+        _zledit_build_overlay
+        echo "$REPLY"
+    ' 2>&1)
+    # Expected: each simple token gets a [letter] prefix, composite is skipped.
+    # snd → [a]snd, "hi → [s]"hi, there" → [d]there"
+    [[ "$result" == '[a]snd [s]"hi [d]there"' ]] && test_pass "Composite: overlay skips composites" \
+        || test_fail "Composite overlay" "Got: '$result'"
+}
+
+test_composite_unload_cleans_state() {
+    local result
+    result=$(zsh -c '
+        source '"$PLUGIN_DIR"'/zledit.plugin.zsh
+        BUFFER='"'"'echo "hi"'"'"'
+        _zledit_tokenize
+        zledit-unload
+        # All composite-related globals should be unset
+        local check=0
+        [[ -z "${_ze_is_composite+x}" ]] && (( check++ ))
+        [[ -z "${_ze_composite_symmetric+x}" ]] && (( check++ ))
+        [[ -z "${_ze_composite_opens+x}" ]] && (( check++ ))
+        [[ -z "${_ze_composite_closes+x}" ]] && (( check++ ))
+        # Helper functions should be gone
+        (( ! ${+functions[_zledit_is_balanced]} )) && (( check++ ))
+        (( ! ${+functions[_zledit_find_composite_spans]} )) && (( check++ ))
+        echo "$check"
+    ' 2>&1)
+    [[ "$result" == "6" ]] && test_pass "Composite: unload cleans all state" \
+        || test_fail "Composite unload" "Got: $result (expected 6)"
 }
 
 test_tokenizer_equals_in_word() {
@@ -1646,7 +1945,14 @@ test_tokenizer_fixtures() {
             source '"$PLUGIN_DIR"'/zledit.plugin.zsh
             BUFFER=$(<'"$tmpfile"')
             _zledit_tokenize
-            print -r -- "${#_ze_words[@]} ${_ze_positions[*]}"
+            local simple_count=0 simple_positions="" i
+            for i in {1..${#_ze_words[@]}}; do
+                if [[ "${_ze_is_composite[$i]}" != "1" ]]; then
+                    (( simple_count++ ))
+                    simple_positions+="${simple_positions:+ }${_ze_positions[$i]}"
+                fi
+            done
+            print -r -- "${simple_count} ${simple_positions}"
         ' 2>/dev/null)
         rm -f "$tmpfile"
         actual_count="${result%% *}"
@@ -1684,7 +1990,14 @@ test_multiline_fixtures() {
             source '"$PLUGIN_DIR"'/zledit.plugin.zsh
             BUFFER=$(<'"$tmpfile"')
             _zledit_tokenize
-            print -r -- "${#_ze_words[@]} ${_ze_positions[*]}"
+            local simple_count=0 simple_positions="" i
+            for i in {1..${#_ze_words[@]}}; do
+                if [[ "${_ze_is_composite[$i]}" != "1" ]]; then
+                    (( simple_count++ ))
+                    simple_positions+="${simple_positions:+ }${_ze_positions[$i]}"
+                fi
+            done
+            print -r -- "${simple_count} ${simple_positions}"
         ' 2>/dev/null)
         rm -f "$tmpfile"
         actual_count="${result%% *}"
@@ -3352,6 +3665,24 @@ run_test test_find_action_by_key
 run_test test_batch_no_duplicates_noop
 run_test test_batch_functions_defined
 run_test test_unload_cleans_batch
+
+# Composite span tests
+run_test test_composite_basic_double_quotes
+run_test test_composite_simple_tokens_unchanged
+run_test test_composite_nested_balanced_pairs
+run_test test_composite_quad_quote_edge
+run_test test_composite_brackets_and_braces
+run_test test_composite_backticks
+run_test test_composite_apostrophe_inside_double_quotes
+run_test test_composite_realistic_natural_language
+run_test test_composite_unmatched_no_span
+run_test test_composite_no_delimiters
+run_test test_composite_empty_buffer
+run_test test_composite_config_off
+run_test test_composite_config_subset
+run_test test_composite_balanced_helper
+run_test test_composite_overlay_skips_composites
+run_test test_composite_unload_cleans_state
 
 # Config permutation tests
 run_test test_config_overlay_off
