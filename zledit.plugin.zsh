@@ -1048,8 +1048,11 @@ zledit-setup-bindings() {
     bindkey "$key" zledit-widget
 }
 
-# Defer binding setup to a one-time precmd hook so it runs after compinit and
-# other plugins (e.g. zsh-syntax-highlighting) which may overwrite the binding key later.
+# Bind once at load (covers non-interactive shells / scripted reloads),
+# then re-assert via a one-time precmd hook so we win against compinit and
+# other plugins (e.g. zsh-syntax-highlighting) that may overwrite the binding later.
+zledit-setup-bindings
+
 _zledit_deferred_setup() {
     emulate -L zsh
     (( $+functions[zledit-setup-bindings] )) && zledit-setup-bindings
