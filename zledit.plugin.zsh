@@ -1192,7 +1192,17 @@ zledit-setup-bindings() {
     bindkey "$key" zledit-widget
 }
 
+# Bind once at load (covers non-interactive shells / scripted reloads),
+# then re-assert via a one-time precmd hook so we win against compinit and
+# other plugins (e.g. zsh-syntax-highlighting) that may overwrite the binding later.
 zledit-setup-bindings
+
+_zledit_deferred_setup() {
+    emulate -L zsh
+    (( $+functions[zledit-setup-bindings] )) && zledit-setup-bindings
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _zledit_deferred_setup
 
 # ------------------------------------------------------------------------------
 # List registered actions/previewers
@@ -1225,8 +1235,10 @@ zledit-unload() {
 
     zle -D zledit-widget 2>/dev/null
 
+    add-zsh-hook -d precmd _zledit_deferred_setup
+
     unfunction zledit-widget _zledit_load_config \
-               _zledit_load_default_actions \
+               _zledit_load_default_actions _zledit_deferred_setup \
                _zledit_invoke_picker _zledit_tokenize \
                _zledit_is_balanced _zledit_find_composite_spans \
                _zledit_supports_binds _zledit_do_jump \

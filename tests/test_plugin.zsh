@@ -3396,7 +3396,7 @@ test_old_fzf_clears_picker() {
 test_no_picker_graceful() {
     local result
     result=$(zsh -c '
-        PATH=/usr/bin:/bin
+        PATH=""
         hash -r
         source '"$PLUGIN_DIR"'/zledit.plugin.zsh
         echo "${Zledit[picker]:-none}"
@@ -3411,7 +3411,7 @@ test_no_picker_graceful() {
 test_plugin_loads_without_picker() {
     local result
     result=$(zsh -c '
-        PATH=/usr/bin:/bin
+        PATH=""
         hash -r
         source '"$PLUGIN_DIR"'/zledit.plugin.zsh
         (( $+functions[_zledit_tokenize] )) && echo "ok" || echo "fail"
